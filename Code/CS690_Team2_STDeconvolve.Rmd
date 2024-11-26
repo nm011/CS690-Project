@@ -1,0 +1,230 @@
+---
+title: "CS690: Spatial Data Deconvolution using STDeconvolve"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r}
+require(remotes)
+remotes::install_github('JEFworks-Lab/STdeconvolve')
+install.packages("Seurat")
+install.packages("Matrix")
+install.packages("STdeconvolve")
+```
+
+
+```{r}
+# Load libraries
+library(STdeconvolve)
+library(Seurat)
+library(Matrix)
+```
+
+```{r}
+# Loading the ductal carcinoma data
+seurat_data <- Read10X_h5("C:/Users/user/Downloads/V1_Breast_Cancer_Block_A_Section_1_spatial/V1_Breast_Cancer_Block_A_Section_1_spatial/filtered_feature_bc_matrix.h5")
+spatial_data <- read.csv("C:/Users/user/Downloads/V1_Breast_Cancer_Block_A_Section_1_spatial/V1_Breast_Cancer_Block_A_Section_1_spatial/spatial/tissue_positions_list.csv", header = FALSE)
+colnames(spatial_data) <- c("barcode", "in_tissue", "array_row", "array_col", "pxl_row", "pxl_col")
+
+```
+
+```{r}
+# Create Seurat object from the Seurat Data input
+seurat_obj <- CreateSeuratObject(counts = seurat_data)
+seurat_obj@meta.data$barcode <- rownames(seurat_obj@meta.data)
+spatial_data <- spatial_data[spatial_data$barcode %in% seurat_obj@meta.data$barcode, ]
+seurat_obj@meta.data <- merge(seurat_obj@meta.data, spatial_data, by = "barcode")
+rownames(seurat_obj@meta.data) <- seurat_obj@meta.data$barcode
+
+```
+
+
+```{r}
+# Extract the position and count matrices
+pos <- seurat_obj@meta.data[, c("pxl_row", "pxl_col")] # Pixel positions
+rownames(pos) <- seurat_obj@meta.data$barcode
+
+# Extract the counts from the "counts" layer of the RNA assay
+counts <- seurat_obj@assays$RNA@layers$counts
+```
+
+
+### Step 1: Remove pixels with too few genes
+```{r}
+counts_clean <- cleanCounts(
+  counts = counts,
+  min.lib.size = 0,
+  min.reads = 0,
+  min.detected = 0,
+  verbose = TRUE
+)
+```
+
+### Step 2: Feature selection for genes
+```{r}
+
+if (nrow(counts_clean) > 0 && ncol(counts_clean) > 0) {
+  corpus <- restrictCorpus(
+    counts = counts_clean,
+    removeAbove = 1.0,
+    removeBelow = 0.0,
+    alpha = 1.0,
+    plot = TRUE,
+    verbose = TRUE
+  )
+} else {
+  stop("Filtered counts matrix is empty. Adjust the filtering thresholds in cleanCounts.")
+}
+```
+
+### Step 3: Fit the LDA models
+```{r}
+ldas <- fitLDA(
+  t(as.matrix(counts)),
+  Ks = seq(2, 9, by = 1),
+  perc.rare.thresh = 0.05,
+  plot = TRUE,
+  verbose = TRUE
+)
+```
+
+- The above code took around 955 mins or 15 hours to run and calculate all the LDA models
+
+### Step 4: Select the optimal model with minimum perplexity
+```{r}
+optLDA <- optimalModel(models = ldas, opt = "min")
+```
+
+
+### Step 5: Extract cell-type proportions (theta) and gene expression profiles (beta)
+```{r}
+results <- getBetaTheta(
+  optLDA,
+  perc.filt = 0.05,
+  betaScale = 1000
+)
+```
+
+
+```{r}
+deconProp <- results$theta # For the Cell-type proportions
+deconGexp <- results$beta  # For the Gene expression profiles
+```
+
+```{r}
+heatmap(as.matrix(deconProp), Rowv = NA, Colv = NA, col = heat.colors(100), scale = "row")
+```
+
+```{r}
+plot(deconProp[,1], deconProp[,2], xlab = "Cell-Type 1", ylab = "Cell-Type 2", main = "Correlation of Cell Types")
+
+```
+
+### Save the Results 
+```{r}
+write.csv(
+  deconProp,
+  file = "deconvolved_cell_type_proportions.csv",
+  row.names = TRUE
+)
+```
+
+```{r}
+saveRDS(
+  deconProp,
+  file = "deconvolved_cell_type_proportions.rds"
+)
+```
+
+```{r}
+write.csv(
+  deconGexp,
+  file = "deconvolved_gene_expression_profiles.csv",
+  row.names = TRUE
+)
+```
+
+
+```{r}
+saveRDS(
+  deconGexp,
+  file = "deconvolved_gene_expression_profiles.rds"
+)
+```
+
+
+```{r}
+png("deconvolved_topics_visualization.png", width = 800, height = 600)
+vizAllTopics(
+  deconProp, pos,
+  groups = seurat_obj@meta.data$in_tissue,
+  group_cols = rainbow(length(unique(seurat_obj@meta.data$in_tissue))),
+  r = 0.4
+)
+dev.off()
+```
+
+```{r}
+install.packages("Seurat")
+library(Seurat)
+library(SeuratDisk)
+
+seurat_object <- readRDS("deconvolved_cell_type_proportions.rds")
+seurat_object <- UpdateSeuratObject(seurat_object)
+SaveH5Seurat(seurat_object, filename = "deconvolved_cell_type_proportions.h5Seurat")
+Convert("deconvolved_cell_type_proportions.h5Seurat", dest = "h5ad")
+```
+
+
+### Unneccessary Code 
+```{r}
+#vizAllTopics(deconProp, pos, 
+ #            groups = annot, 
+  #           group_cols = rainbow(length(levels(annot))),
+   #          r=0.4)
+```
+
+
+```{r}
+# Step 6: Visualize results
+#vizAllTopics(
+ # deconProp, pos,
+  #groups = seurat_obj@meta.data$in_tissue,
+  #group_cols = rainbow(length(unique(seurat_obj@meta.data$in_tissue))),
+  #r = 0.4
+)
+```
+
+
+```{r}
+# Remove rows with NA in Pixel.Groups (if necessary)
+#seurat_obj@meta.data <- seurat_obj@meta.data[!is.na(seurat_obj@meta.data$Pixel.Groups), ]
+```
+
+```{r}
+# Ensure the rows are ordered consistently between seurat_obj and deconProp
+#seurat_obj@meta.data <- seurat_obj@meta.data[order(seurat_obj@meta.data$barcode), ]
+#deconProp <- deconProp[order(seurat_obj@meta.data$barcode), ]
+
+```
+
+
+```{r}
+#vizAllTopics(
+ # deconProp, pos,
+  #groups = seurat_obj@meta.data$Pixel.Groups
+)
+
+```
+
+
+```{r}
+# Verify the length of the color vector
+#length(rainbow(length(unique(seurat_obj@meta.data$Pixel.Groups))))
+
+```
+
+
+
+
